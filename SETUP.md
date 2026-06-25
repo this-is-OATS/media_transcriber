@@ -16,7 +16,7 @@ brew install python@3.11 ffmpeg@7
 
 # Clone the repo
 git clone https://github.com/this-is-OATS/media_transcriber.git
-cd media-transcriber
+cd media_transcriber
 
 # Install Python dependencies
 python3.11 -m venv .venv

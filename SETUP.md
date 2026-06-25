@@ -5,7 +5,7 @@
 Run this in Terminal to install all dependencies:
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/YOUR_USERNAME/media-transcriber/main/setup.sh)
+bash <(curl -s https://raw.githubusercontent.com/this-is-OATS/media_transcriber/main/setup.sh)
 ```
 
 Or manually:
@@ -15,7 +15,7 @@ Or manually:
 brew install python@3.11 ffmpeg@7
 
 # Clone the repo
-git clone https://github.com/YOUR_USERNAME/media-transcriber.git
+git clone https://github.com/this-is-OATS/media_transcriber.git
 cd media-transcriber
 
 # Install Python dependencies

@@ -143,7 +143,7 @@ class MainWindow(QMainWindow):
         # Diarization row
         diar_row = QHBoxLayout()
         self.chk_diarize = QCheckBox("Detect speakers (WhisperX)")
-        self.chk_diarize.setChecked(self.settings.get("diarize", False))
+        self.chk_diarize.setChecked(self.settings.get("diarize", True))
         self.chk_diarize.toggled.connect(self._on_diarize_toggled)
         diar_row.addWidget(self.chk_diarize)
 

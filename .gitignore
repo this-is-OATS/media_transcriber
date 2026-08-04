@@ -8,3 +8,6 @@ dist/
 .DS_Store
 *.log
 .claude/
+
+# App Support copy — contains hf_token in settings.json. Never commit.
+_appsupport/

@@ -9,11 +9,14 @@ Ordering is shortest-first and deliberate: the small files establish a real
 throughput number within the first few minutes, so you can extrapolate the ETA
 for the multi-hour files and abort before committing days of CPU.
 
+Run it through ./rerun.sh, not bare python3 -- it needs the project venv and
+the ffmpeg@7 libs, exactly like run.sh.
+
 Usage:
-    python3 rerun_diarize.py --dry-run          # preflight, touches nothing
-    python3 rerun_diarize.py                    # run
-    python3 rerun_diarize.py --limit 3          # first 3 (shortest) only
-    python3 rerun_diarize.py --model base       # faster, lower quality
+    ./rerun.sh --dry-run          # preflight, touches nothing
+    ./rerun.sh                    # run
+    ./rerun.sh --limit 3          # first 3 (shortest) only
+    ./rerun.sh --model base       # faster, lower quality
 
 Safe to interrupt (Ctrl-C) and re-run: completed files are detected from the DB
 and skipped. The database is backed up before the first write.
@@ -227,13 +230,23 @@ def main() -> int:
         log("--skip-missing to process only what is available.")
         return 1
 
+    # Import before backing up: a failed import should not litter the disk with
+    # a backup of a database nothing was going to touch.
+    sys.path.insert(0, str(Path(__file__).parent))
+    try:
+        from app.db import Database
+        from app.transcriber import Transcriber
+    except ModuleNotFoundError as exc:
+        print()
+        log(f"ERROR: missing dependency '{exc.name}'.")
+        log("This needs the project venv, not system python. Use ./rerun.sh,")
+        log("which sets the same interpreter and FFmpeg paths as run.sh:")
+        log("    ./rerun.sh " + " ".join(sys.argv[1:]))
+        return 1
+
     print()
     backup = backup_db(args.db)
     log(f"database backed up -> {backup.name}")
-
-    sys.path.insert(0, str(Path(__file__).parent))
-    from app.db import Database
-    from app.transcriber import Transcriber
 
     db = Database(args.db)
     transcriber = Transcriber(model_name=model, diarize=True, hf_token=hf_token)

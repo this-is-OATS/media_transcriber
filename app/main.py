@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread
@@ -24,13 +25,17 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSpinBox,
     QStatusBar,
     QVBoxLayout,
     QWidget,
 )
 
 from .db import Database
-from .worker import TranscriptionWorker
+from .notion_sync import DEFAULT_DATABASE_ID, NotionSync, find_token
+from .photos_worker import PhotosScanWorker
+from . import version_label
+from .worker import NotionBackfillWorker, TranscriptionWorker
 
 
 WHISPER_MODELS = ["tiny", "base", "small", "medium", "large-v3"]
@@ -38,6 +43,10 @@ DEFAULT_MODEL = "base"
 
 APP_DATA = Path.home() / "Library" / "Application Support" / "MediaTranscriber"
 SETTINGS_PATH = APP_DATA / "settings.json"
+PHOTOS_OUTPUT = Path.home() / "Documents" / "MediaTranscriber" / "Apple Photos"
+PHOTOS_KEEP_DIR = Path.home() / "Movies" / "MediaTranscriber Photos"
+PHOTOS_TEMP_DIR = APP_DATA / "photos_cache"
+LOG_DIR = Path.home() / "Library" / "Logs" / "MediaTranscriber"
 
 
 def load_settings() -> dict:
@@ -100,13 +109,14 @@ class DropZone(QLabel):
 class MainWindow(QMainWindow):
     def __init__(self, db: Database):
         super().__init__()
-        self.setWindowTitle("Media Transcriber")
+        self.setWindowTitle(f"Media Transcriber {version_label()}")
         self.resize(860, 680)
 
         self.db = db
         self.settings = load_settings()
         self._thread: QThread | None = None
         self._worker: TranscriptionWorker | None = None
+        self._notion: NotionSync | None = None
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -134,6 +144,14 @@ class MainWindow(QMainWindow):
         self.model_combo.setCurrentText(self.settings.get("model", DEFAULT_MODEL))
         controls.addWidget(self.model_combo)
 
+        self.btn_photos = QPushButton("Scan Photos Library")
+        self.btn_photos.setToolTip(
+            "Transcribe videos from Apple Photos that haven't been done yet.\n"
+            f"Transcripts go to {PHOTOS_OUTPUT}"
+        )
+        self.btn_photos.clicked.connect(self.scan_photos)
+        controls.addWidget(self.btn_photos)
+
         self.btn_cancel = QPushButton("Cancel")
         self.btn_cancel.setEnabled(False)
         self.btn_cancel.clicked.connect(self.cancel_transcription)
@@ -155,6 +173,47 @@ class MainWindow(QMainWindow):
         self.hf_token_input.setEnabled(self.chk_diarize.isChecked())
         diar_row.addWidget(self.hf_token_input, 1)
         layout.addLayout(diar_row)
+
+        # Photos options
+        photos_row = QHBoxLayout()
+        photos_row.addWidget(QLabel("Photos: max videos per run"))
+        self.photos_limit = QSpinBox()
+        self.photos_limit.setRange(0, 100000)
+        self.photos_limit.setSpecialValueText("all")
+        self.photos_limit.setValue(self.settings.get("photos_limit", 25))
+        photos_row.addWidget(self.photos_limit)
+        self.chk_keep_downloads = QCheckBox(
+            f"Keep iCloud downloads in ~/Movies/{PHOTOS_KEEP_DIR.name}"
+        )
+        self.chk_keep_downloads.setToolTip(
+            "Off: downloaded videos are deleted after transcribing (saves disk).\n"
+            "On: keep them so they can be imported into DaVinci later."
+        )
+        self.chk_keep_downloads.setChecked(self.settings.get("photos_keep", False))
+        photos_row.addWidget(self.chk_keep_downloads)
+        photos_row.addStretch()
+        layout.addLayout(photos_row)
+
+        # Notion row
+        notion_row = QHBoxLayout()
+        self.chk_notion = QCheckBox("Send to Notion (Media Logs)")
+        self.chk_notion.setChecked(self.settings.get("notion", bool(find_token())))
+        notion_row.addWidget(self.chk_notion)
+        notion_row.addWidget(QLabel("Notion key:"))
+        self.notion_token_input = QLineEdit()
+        self.notion_token_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.notion_token_input.setPlaceholderText(
+            "blank = use the voice-memo pipeline's key"
+        )
+        self.notion_token_input.setText(self.settings.get("notion_token", ""))
+        notion_row.addWidget(self.notion_token_input, 1)
+        self.btn_notion_backfill = QPushButton("Send Existing to Notion")
+        self.btn_notion_backfill.setToolTip(
+            "Log every transcript already on this Mac that isn't in Notion yet."
+        )
+        self.btn_notion_backfill.clicked.connect(self.notion_backfill)
+        notion_row.addWidget(self.btn_notion_backfill)
+        layout.addLayout(notion_row)
 
         # First-time hint for HF
         self.hf_hint = QLabel(
@@ -202,6 +261,10 @@ class MainWindow(QMainWindow):
             "model": self.model_combo.currentText(),
             "diarize": self.chk_diarize.isChecked(),
             "hf_token": self.hf_token_input.text().strip(),
+            "photos_limit": self.photos_limit.value(),
+            "photos_keep": self.chk_keep_downloads.isChecked(),
+            "notion": self.chk_notion.isChecked(),
+            "notion_token": self.notion_token_input.text().strip(),
         })
         save_settings(self.settings)
 
@@ -225,17 +288,73 @@ class MainWindow(QMainWindow):
             self.handle_paths([Path(folder)])
 
     # ----- transcription -----
-    def handle_paths(self, paths: list[Path]) -> None:
+    def _ready_to_start(self) -> bool:
         if self._thread is not None:
             self.log_line("Already transcribing — wait or cancel first.")
-            return
-
-        diarize = self.chk_diarize.isChecked()
-        hf_token = self.hf_token_input.text().strip()
-        if diarize and not hf_token:
+            return False
+        if self.chk_diarize.isChecked() and not self.hf_token_input.text().strip():
             self.log_line("ERROR: speaker detection is on but no HF token set.")
+            return False
+        self._persist_settings()
+        self._notion = None
+        if self.chk_notion.isChecked():
+            self._notion = self._connect_notion()
+            if self._notion is None:
+                return False
+        return True
+
+    def _connect_notion(self) -> NotionSync | None:
+        token = find_token(self.notion_token_input.text().strip())
+        if not token:
+            self.log_line("ERROR: 'Send to Notion' is on but no Notion key was found.")
+            return None
+        try:
+            sync = NotionSync(
+                token, self.settings.get("notion_database_id", DEFAULT_DATABASE_ID)
+            )
+            sync.check()
+        except Exception as exc:  # noqa: BLE001
+            self.log_line(f"ERROR: {exc}")
+            return None
+        return sync
+
+    def notion_backfill(self) -> None:
+        if self._thread is not None:
+            self.log_line("Already running — wait or cancel first.")
             return
         self._persist_settings()
+        sync = self._connect_notion()
+        if sync is None:
+            return
+        self._start_worker(NotionBackfillWorker(db=self.db, notion=sync))
+
+    def _worker_kwargs(self) -> dict:
+        hf_token = self.hf_token_input.text().strip()
+        return {
+            "model_name": self.model_combo.currentText(),
+            "diarize": self.chk_diarize.isChecked(),
+            "hf_token": hf_token or None,
+            "notion": self._notion,
+        }
+
+    def scan_photos(self) -> None:
+        if not self._ready_to_start():
+            return
+        keep = self.chk_keep_downloads.isChecked()
+        self.out_label.setText(str(PHOTOS_OUTPUT))
+        self.log_line(f"Output dir: {PHOTOS_OUTPUT}")
+        self._start_worker(PhotosScanWorker(
+            output_dir=PHOTOS_OUTPUT,
+            cache_dir=PHOTOS_KEEP_DIR if keep else PHOTOS_TEMP_DIR,
+            db=self.db,
+            keep_downloads=keep,
+            limit=self.photos_limit.value() or None,
+            **self._worker_kwargs(),
+        ))
+
+    def handle_paths(self, paths: list[Path]) -> None:
+        if not self._ready_to_start():
+            return
 
         # Output dir = "transcriptions" inside dropped folder OR next to the file.
         first = paths[0]
@@ -245,15 +364,13 @@ class MainWindow(QMainWindow):
         self.out_label.setText(str(output_dir))
         self.log_line(f"Output dir: {output_dir}")
 
+        self._start_worker(TranscriptionWorker(
+            inputs=paths, output_dir=output_dir, db=self.db, **self._worker_kwargs()
+        ))
+
+    def _start_worker(self, worker: TranscriptionWorker) -> None:
         self._thread = QThread(self)
-        self._worker = TranscriptionWorker(
-            inputs=paths,
-            output_dir=output_dir,
-            db=self.db,
-            model_name=self.model_combo.currentText(),
-            diarize=diarize,
-            hf_token=hf_token or None,
-        )
+        self._worker = worker
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._on_progress_msg)
@@ -309,6 +426,12 @@ class MainWindow(QMainWindow):
     def _set_busy(self, busy: bool) -> None:
         self.btn_files.setEnabled(not busy)
         self.btn_folder.setEnabled(not busy)
+        self.btn_photos.setEnabled(not busy)
+        self.photos_limit.setEnabled(not busy)
+        self.chk_keep_downloads.setEnabled(not busy)
+        self.chk_notion.setEnabled(not busy)
+        self.notion_token_input.setEnabled(not busy)
+        self.btn_notion_backfill.setEnabled(not busy)
         self.model_combo.setEnabled(not busy)
         self.chk_diarize.setEnabled(not busy)
         self.hf_token_input.setEnabled(not busy and self.chk_diarize.isChecked())
@@ -316,6 +439,14 @@ class MainWindow(QMainWindow):
 
     def log_line(self, msg: str) -> None:
         self.log.appendPlainText(msg)
+        # Also keep a daily log file so long/overnight runs can be reviewed later.
+        try:
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            now = datetime.now()
+            with open(LOG_DIR / f"{now:%Y-%m-%d}.log", "a", encoding="utf-8") as f:
+                f.write(f"{now:%H:%M:%S}  {msg}\n")
+        except OSError:
+            pass
 
 
 def main() -> int:

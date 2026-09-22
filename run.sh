@@ -2,6 +2,9 @@
 set -e
 cd "$(dirname "$0")"
 
+# Apps launched from Finder/Dock get a minimal PATH; make sure ffmpeg is found.
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
 # torchcodec (pulled in by pyannote.audio) wants FFmpeg 4-7 libs.
 # brew's `ffmpeg` is currently v8 (libavutil.60); `ffmpeg@7` provides v7 (libavutil.59).
 FFMPEG7_LIB="/opt/homebrew/opt/ffmpeg@7/lib"

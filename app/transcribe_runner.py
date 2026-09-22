@@ -35,6 +35,8 @@ def main() -> int:
             Path(payload["video_path"]),
             Path(payload["output_dir"]),
             progress_cb=emit_progress,
+            output_name=payload.get("output_name"),
+            meta=payload.get("meta"),
         )
     except Exception as exc:  # noqa: BLE001
         sys.stderr.write(f"ERROR: {exc}\n")

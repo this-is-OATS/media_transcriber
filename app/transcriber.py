@@ -56,11 +56,24 @@ def segments_to_markdown(
     model_name: str,
     duration: float,
     diarized: bool,
+    title: str | None = None,
+    meta: dict | None = None,
 ) -> str:
-    lines = [
-        f"# {video_path.name}",
-        "",
-        f"- **Source:** `{video_path}`",
+    meta = meta or {}
+    lines = [f"# {title or video_path.name}", ""]
+    if meta.get("source") == "photos":
+        lines += [
+            f"- **Source:** Apple Photos (`{meta.get('original_filename')}`)",
+            f"- **Photos ID:** `{meta.get('photos_uuid')}`",
+            f"- **Taken:** {meta.get('taken_at')}",
+        ]
+        if meta.get("location"):
+            lines.append(f"- **Location:** {meta['location']}")
+        if meta.get("albums"):
+            lines.append(f"- **Albums:** {meta['albums']}")
+    else:
+        lines.append(f"- **Source:** `{video_path}`")
+    lines += [
         f"- **Duration:** {format_timestamp(duration)}",
         f"- **Language:** {language}",
         f"- **Model:** {model_name}",
@@ -212,6 +225,8 @@ class Transcriber:
         video_path: Path,
         output_dir: Path,
         progress_cb: Callable[[str], None] | None = None,
+        output_name: str | None = None,
+        meta: dict | None = None,
     ) -> TranscriptionResult:
         if progress_cb:
             mode = "whisperx + diarization" if self.diarize else "whisper"
@@ -225,11 +240,11 @@ class Transcriber:
             segments, language, duration = self._transcribe_whisper(video_path)
 
         output_dir.mkdir(parents=True, exist_ok=True)
-        md_path = output_dir / f"{video_path.stem}.md"
+        md_path = output_dir / f"{output_name or video_path.stem}.md"
         md_path.write_text(
             segments_to_markdown(
                 video_path, segments, language, self.model_name, duration,
-                diarized=self.diarize,
+                diarized=self.diarize, title=output_name, meta=meta,
             ),
             encoding="utf-8",
         )

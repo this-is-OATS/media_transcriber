@@ -11,7 +11,10 @@ What differs is deliberate and pinned:
   * faster-whisper with voice-activity detection ON and NO conditioning on the
     previous segment's text — the anti-repetition pair from the plan's Phase 3;
   * the audio track is extracted once with ffmpeg (16 kHz mono) and that is
-    what gets transcribed, so a 4 GB video is read once, not shuttled around.
+    what gets transcribed, so a 4 GB video is read once, not shuttled around;
+  * a whole-file SHA-256 is stamped on every row (sqlite ``sha256`` and the
+    Media Logs ``Content Hash`` property) from the first one, so the NAS
+    sort-and-move (plan Phase 2b) can re-link transcripts by content.
 
     .venv/bin/python batch.py ROOT [ROOT ...]     roots run in the order given
         --model large-v3-turbo    pinned model name (faster-whisper)
@@ -33,6 +36,7 @@ Prints a single machine-readable SUMMARY line at the end for the wrapper
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import signal
 import subprocess
@@ -91,6 +95,14 @@ def ffprobe(path: Path) -> tuple[float | None, bool]:
             except ValueError:
                 pass
     return duration, has_audio
+
+
+def sha256_of(path: Path) -> str:
+    """Whole-file SHA-256 — the plan's stable identity for a loose file. A
+    10 GB video over USB is ~30 s; the transcript takes minutes, so it is
+    cheap next to the work it protects (the NAS move re-links by this)."""
+    with open(path, "rb") as fh:
+        return hashlib.file_digest(fh, "sha256").hexdigest()
 
 
 def extract_audio(src: Path, dst: Path) -> None:
@@ -210,8 +222,10 @@ def main() -> int:
         wav = AUDIO_CACHE / f"{abs(hash(str(src)))}.wav"
         t0 = time.time()
         try:
+            digest = sha256_of(src)
+            t_hash = time.time() - t0
             extract_audio(src, wav)
-            t_extract = time.time() - t0
+            t_extract = time.time() - t0 - t_hash
             result = transcriber.transcribe(
                 wav, src.parent / "transcriptions",
                 progress_cb=lambda m: log(f"  {m.strip()}"),
@@ -232,19 +246,21 @@ def main() -> int:
         n_words = sum(len(s["text"].split()) for s in result.segments)
         log(f"  done: {dur / 60:.1f} min audio, speech {speech / 60:.1f} min, "
             f"{n_words} words, {elapsed / 60:.1f} min wall "
-            f"(extract {t_extract:.0f}s) = {rtf:.1f}x realtime")
+            f"(hash {t_hash:.0f}s, extract {t_extract:.0f}s) = {rtf:.1f}x realtime  "
+            f"sha256={digest[:12]}…")
 
         video_id = db.upsert_video(
             path=str(src), filename=src.name, duration=dur,
             language=result.language, model=result.model_name,
         )
         db.insert_segments(video_id, result.segments)
+        db.set_sha256(video_id, digest)
         if notion is not None:
             try:
                 page_id = notion.push(
                     media_id=str(src), title=src.stem, segments=result.segments,
                     duration=dur, language=result.language, model=result.model_name,
-                    file_path=str(src),
+                    file_path=str(src), content_hash=digest,
                 )
                 db.set_notion_page(video_id, page_id)
                 log("  Notion: logged to Media Logs")

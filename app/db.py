@@ -84,6 +84,12 @@ class Database:
         )
         if "notion_page_id" not in vcols:
             conn.execute("ALTER TABLE videos ADD COLUMN notion_page_id TEXT")
+        # Content hash (SHA-256 of the whole file): the stable identity the
+        # Media Transcription Plan requires on every row, so a later move on the
+        # NAS can re-link a transcript to its video by content, not by path.
+        if "sha256" not in vcols:
+            conn.execute("ALTER TABLE videos ADD COLUMN sha256 TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_sha256 ON videos(sha256)")
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -165,6 +171,19 @@ class Database:
                 "SELECT 1 FROM videos WHERE path = ?", (path,)
             ).fetchone()
             return row is not None
+
+    def set_sha256(self, video_id: int, sha256: str) -> None:
+        with self._connect() as conn:
+            conn.execute("UPDATE videos SET sha256 = ? WHERE id = ?", (sha256, video_id))
+
+    def videos_without_sha256(self) -> list[sqlite3.Row]:
+        """File-backed rows still lacking a content hash (Photos-only rows have
+        no local file to hash; their UUID is already their stable id)."""
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT * FROM videos WHERE sha256 IS NULL "
+                "AND path NOT LIKE 'photos://%' ORDER BY id"
+            ).fetchall()
 
     def model_for(self, path: str) -> str | None:
         """Model that transcribed `path`, or None if it has never been done."""

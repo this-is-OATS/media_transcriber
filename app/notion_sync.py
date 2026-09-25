@@ -120,6 +120,12 @@ class NotionSync:
         )
         return res["results"][0]["id"] if res["results"] else None
 
+    def set_content_hash(self, page_id: str, sha256: str) -> None:
+        """Stamp the content hash on an existing page (backfill_hashes.py)."""
+        self.client.pages.update(
+            page_id=page_id, properties={"Content Hash": {"rich_text": _rt(sha256)}}
+        )
+
     def push(
         self,
         *,
@@ -132,6 +138,7 @@ class NotionSync:
         meta: dict | None = None,
         file_path: str | None = None,
         add_to_existing: bool = True,
+        content_hash: str | None = None,
     ) -> str:
         """Create (or add to) the page for one transcript. Returns page id.
 
@@ -166,6 +173,8 @@ class NotionSync:
             "Has Speakers": {"checkbox": bool(speakers)},
             "Empty": {"checkbox": empty},
         }
+        if content_hash:
+            props["Content Hash"] = {"rich_text": _rt(content_hash)}
 
         notes_title = "Notes — Whisper"
         page_id = self._find_page(media_id)

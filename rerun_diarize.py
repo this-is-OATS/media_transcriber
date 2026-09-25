@@ -28,6 +28,7 @@ import json
 import shutil
 import sqlite3
 import sys
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -131,11 +132,42 @@ def gather_targets(db_path: Path, redo_all: bool) -> tuple[list[dict], list[dict
     return targets, duplicates, done
 
 
-def preflight(targets: list[dict]) -> tuple[list[dict], list[dict]]:
-    present, missing = [], []
+def probe_path(path: Path, timeout: float = 5.0) -> str:
+    """Classify a path as 'ok', 'missing', or 'unreadable: <why>'.
+
+    Path.exists() is not safe on Google Drive File Stream: an unmaterialized
+    file can make os.stat() block for a minute and then raise ETIMEDOUT rather
+    than return False. A timeout means "Drive did not answer", which is NOT the
+    same as "the file is gone" -- conflating them would silently drop real
+    recordings from the queue. The stat runs on a daemon thread so a wedged
+    mount costs `timeout` seconds instead of hanging preflight indefinitely.
+    """
+    result: dict[str, str] = {}
+
+    def _check() -> None:
+        try:
+            result["v"] = "ok" if path.exists() else "missing"
+        except OSError as exc:
+            result["v"] = f"unreadable: {exc.strerror or exc}"
+
+    t = threading.Thread(target=_check, daemon=True)
+    t.start()
+    t.join(timeout)
+    return result.get("v", f"unreadable: stat timed out after {timeout:.0f}s")
+
+
+def preflight(targets: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    present, missing, unreadable = [], [], []
     for t in targets:
-        (present if t["path"].exists() else missing).append(t)
-    return present, missing
+        status = probe_path(t["path"])
+        t["status"] = status
+        if status == "ok":
+            present.append(t)
+        elif status == "missing":
+            missing.append(t)
+        else:
+            unreadable.append(t)
+    return present, missing, unreadable
 
 
 def backup_db(db_path: Path) -> Path:
@@ -173,7 +205,7 @@ def main() -> int:
         return 1
 
     targets, duplicates, done = gather_targets(args.db, args.redo_all)
-    present, missing = preflight(targets)
+    present, missing, unreadable = preflight(targets)
 
     print()
     log(f"database : {args.db}")
@@ -189,9 +221,17 @@ def main() -> int:
         for d in duplicates:
             print(f"       {d['filename'][:52]:54} == {d['duplicate_of'][:34]}")
     if missing:
-        log(f"UNREACHABLE ({len(missing)}) -- external volume or Drive not mounted?:")
+        log(f"NOT FOUND ({len(missing)}) -- moved, renamed, or deleted since import:")
         for m in missing:
             print(f"       {m['filename'][:52]:54} {m['path'].parent}")
+    if unreadable:
+        log(f"COULD NOT CHECK ({len(unreadable)}) -- these may well exist; the "
+            f"filesystem did not answer:")
+        for u in unreadable:
+            print(f"       {u['filename'][:52]:54} {u['status']}")
+        log("  Drive File Stream does this for online-only files. In Finder, "
+            "right-click the")
+        log("  folder -> 'Available offline', wait for it to sync, then re-run.")
 
     # A dry run shows the whole plan even if volumes are unmounted -- that is
     # the point of it. A real run only touches what it can actually read.

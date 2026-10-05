@@ -304,8 +304,15 @@ def main() -> int:
                 output_name=f"{src.stem}__{digest[:12]}" if args.output_dir else src.stem,
                 meta={"source_path": str(src)},
             )
+        except subprocess.CalledProcessError:
+            # ffmpeg could not read it (truncated download, 0-byte stub, not
+            # really a video). That will not change tomorrow — never retry.
+            db.mark_skipped(str(src), "unreadable: ffmpeg could not extract audio")
+            log("  skipped: ffmpeg cannot read this file (won't retry)")
+            skipped += 1
+            continue
         except Exception as exc:  # noqa: BLE001
-            log(f"  FAILED: {exc}")
+            log(f"  FAILED: {str(exc)[:300]}")
             failed += 1
             continue
         finally:

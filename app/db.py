@@ -185,6 +185,15 @@ class Database:
                 "AND path NOT LIKE 'photos://%' ORDER BY id"
             ).fetchall()
 
+    def path_for_sha256(self, sha256: str, model: str) -> str | None:
+        """Path of a video with this exact content already transcribed by `model`."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT path FROM videos WHERE sha256 = ? AND model = ? LIMIT 1",
+                (sha256, model),
+            ).fetchone()
+            return row[0] if row else None
+
     def model_for(self, path: str) -> str | None:
         """Model that transcribed `path`, or None if it has never been done."""
         with self._connect() as conn:

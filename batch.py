@@ -23,6 +23,21 @@ What differs is deliberate and pinned:
         --dry-run                 print the queue, transcribe nothing
         --no-notion               local sqlite + markdown only
         --pending                 print the queue count and exit
+        --from-manifest CSV       after the roots, queue every NAS video in
+                                  voice-memo-pipeline's media_manifest.csv,
+                                  smallest first (video extensions only — a
+                                  bare /Volumes/NAS root would sweep in music
+                                  and the voice-memo archive)
+        --output-dir DIR          write markdown here as <stem>__<sha12>.md
+                                  instead of a transcriptions/ folder beside
+                                  each video (the whole-NAS run would litter
+                                  hundreds of folders otherwise)
+
+Guards for the whole-NAS run: a file whose container claims more than 12 hours
+is skipped as broken (one 0 MB file reports 596 h — its audio would not fit the
+boot drive); a file whose extracted audio would not leave 2 GB free is left for
+a later night; a file whose SHA-256 is already transcribed under another path
+is recorded as a duplicate rather than transcribed twice.
 
 Idempotent and resumable: a file already in the sqlite with this model is
 skipped, one done with another model is re-run (Notion gets an additional
@@ -36,7 +51,9 @@ Prints a single machine-readable SUMMARY line at the end for the wrapper
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
+import shutil
 import os
 import signal
 import subprocess
@@ -56,6 +73,9 @@ APP_DATA = Path.home() / "Library" / "Application Support" / "MediaTranscriber"
 DB_PATH = APP_DATA / "transcripts.sqlite"
 AUDIO_CACHE = Path.home() / "Library" / "Caches" / "MediaTranscriber" / "audio"
 DEFAULT_MODEL = "large-v3-turbo"
+MAX_PLAUSIBLE_S = 12 * 3600          # longer than this = broken container
+WAV_BYTES_PER_S = 32000              # 16 kHz mono s16
+MIN_FREE_BYTES = 2 * 1024 ** 3
 
 _stop = False
 
@@ -146,10 +166,33 @@ def collect(roots: list[Path]) -> list[Path]:
     return files
 
 
+def manifest_files(csv_path: Path) -> list[Path]:
+    """NAS videos from media_manifest.csv, smallest first. Drops Photos-only
+    rows, duplicates the manifest already knows, files with no audio stream
+    and containers claiming an implausible duration."""
+    rows = []
+    dropped = 0
+    with open(csv_path, newline="") as fh:
+        for r in csv.DictReader(fh):
+            if r["source"] != "nas" or r["dupe_of"] or r["has_audio"] == "False":
+                dropped += r["source"] == "nas"
+                continue
+            if r["duration_s"] and float(r["duration_s"]) > MAX_PLAUSIBLE_S:
+                dropped += 1
+                continue
+            rows.append((int(r["size_bytes"] or 0), r["path"]))
+    rows.sort()
+    log(f"manifest {csv_path.name}: {len(rows)} NAS videos queued, {dropped} dropped "
+        "(no audio stream / duplicate / implausible duration)")
+    return [Path(p) for _, p in rows]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("roots", nargs="+", type=Path)
+    ap.add_argument("roots", nargs="*", type=Path)
+    ap.add_argument("--from-manifest", type=Path)
+    ap.add_argument("--output-dir", type=Path)
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--stop-after", metavar="HH:MM")
     ap.add_argument("--limit", type=int, default=0)
@@ -162,6 +205,12 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _on_term)
     db = Database(DB_PATH)
     files = collect(args.roots)
+    if args.from_manifest:
+        seen = set(files)
+        files += [f for f in manifest_files(args.from_manifest) if f not in seen]
+    if not files:
+        log("nothing queued (no roots, no manifest)")
+        return 0
 
     queue, already, noaudio_known = [], 0, 0
     for f in files:
@@ -178,10 +227,11 @@ def main() -> int:
         print(f"PENDING {len(queue)}")
         return 0
     if args.dry_run:
-        for f in queue:
+        for f in queue[:40]:
             prev = db.model_for(str(f))
-            log(f"  would run: {f}  ({f.stat().st_size / 1e9:.2f} GB"
-                f"{', re-run: was ' + prev if prev else ''})")
+            log(f"  would run: {f}{'  (re-run: was ' + prev + ')' if prev else ''}")
+        if len(queue) > 40:
+            log(f"  … and {len(queue) - 40} more")
         return 0
 
     notion = None
@@ -200,16 +250,20 @@ def main() -> int:
     transcriber = Transcriber(model_name=args.model, engine="faster-whisper",
                               cpu_threads=args.cpu_threads)
 
-    done = failed = skipped = 0
+    done = failed = skipped = dupes = missing = 0
     audio_s = 0.0
     t_run = time.time()
     for i, src in enumerate(queue, 1):
-        if args.limit and done + failed + skipped >= args.limit:
+        if args.limit and done + failed + skipped + dupes >= args.limit:
             log(f"limit {args.limit} reached")
             break
         if deadline and datetime.now() >= deadline:
             log(f"stop-after {args.stop_after} reached; {len(queue) - i + 1} left for next run")
             break
+        if not src.exists():
+            log(f"[{i}/{len(queue)}] gone since the manifest was built: {src}")
+            missing += 1
+            continue
         prev = db.model_for(str(src))
         size_gb = src.stat().st_size / 1e9
         log(f"[{i}/{len(queue)}] {src}  ({size_gb:.2f} GB{', re-run of ' + prev if prev else ''})")
@@ -219,17 +273,35 @@ def main() -> int:
             log("  skipped: no audio track (won't retry)")
             skipped += 1
             continue
+        if duration and duration > MAX_PLAUSIBLE_S:
+            db.mark_skipped(str(src), f"implausible duration {duration / 3600:.0f} h")
+            log(f"  skipped: container claims {duration / 3600:.0f} h — broken file (won't retry)")
+            skipped += 1
+            continue
+        AUDIO_CACHE.mkdir(parents=True, exist_ok=True)
+        need = (duration or 3600) * WAV_BYTES_PER_S + MIN_FREE_BYTES
+        if shutil.disk_usage(AUDIO_CACHE).free < need:
+            log(f"  deferred: boot drive lacks room for {(duration or 3600) / 3600:.1f} h of audio "
+                f"(+2 GB margin) — left for a later night")
+            failed += 1
+            continue
         wav = AUDIO_CACHE / f"{abs(hash(str(src)))}.wav"
         t0 = time.time()
         try:
             digest = sha256_of(src)
             t_hash = time.time() - t0
+            twin = db.path_for_sha256(digest, args.model)
+            if twin and twin != str(src):
+                db.mark_skipped(str(src), f"duplicate of {twin} ({digest})")
+                log(f"  duplicate content of {twin} — not transcribed twice")
+                dupes += 1
+                continue
             extract_audio(src, wav)
             t_extract = time.time() - t0 - t_hash
             result = transcriber.transcribe(
-                wav, src.parent / "transcriptions",
+                wav, args.output_dir or src.parent / "transcriptions",
                 progress_cb=lambda m: log(f"  {m.strip()}"),
-                output_name=src.stem,
+                output_name=f"{src.stem}__{digest[:12]}" if args.output_dir else src.stem,
                 meta={"source_path": str(src)},
             )
         except Exception as exc:  # noqa: BLE001
@@ -270,9 +342,10 @@ def main() -> int:
         done += 1
 
     wall = time.time() - t_run
-    pending = len(queue) - done - failed - skipped
+    pending = len(queue) - done - skipped - dupes - missing
     rtf = audio_s / wall if wall else 0.0
-    log(f"SUMMARY done={done} failed={failed} no_audio={skipped} pending={pending} "
+    log(f"SUMMARY done={done} failed={failed} skipped={skipped} dupes={dupes} "
+        f"gone={missing} pending={pending} "
         f"audio={fmt_h(audio_s)} wall={fmt_h(wall)} realtime={rtf:.1f}x model={args.model}")
     return 0
 

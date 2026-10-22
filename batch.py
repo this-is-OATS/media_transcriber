@@ -28,6 +28,7 @@ What differs is deliberate and pinned:
                                   smallest first (video extensions only — a
                                   bare /Volumes/NAS root would sweep in music
                                   and the voice-memo archive)
+        --skip-bucket PREFIX      leave out manifest rows in that bucket (repeatable)
         --output-dir DIR          write markdown here as <stem>__<sha12>.md
                                   instead of a transcriptions/ folder beside
                                   each video (the whole-NAS run would litter
@@ -169,16 +170,21 @@ def collect(roots: list[Path]) -> list[Path]:
 DURATIONS: dict[str, float] = {}   # path -> seconds, from the manifest (hours remaining)
 
 
-def manifest_files(csv_path: Path) -> list[Path]:
+def manifest_files(csv_path: Path, skip_buckets: list[str] = ()) -> list[Path]:
     """NAS videos from media_manifest.csv, smallest first. Drops Photos-only
-    rows, duplicates the manifest already knows, files with no audio stream
-    and containers claiming an implausible duration."""
+    rows, duplicates the manifest already knows, files with no audio stream,
+    containers claiming an implausible duration, and any bucket named in
+    skip_buckets (prefix match on the manifest's bucket column — e.g. the
+    Live Photo clips under "PHOTOS EXPORT/PHOTOS", Johnny 2026-10-22)."""
     rows = []
-    dropped = 0
+    dropped = skipped_b = 0
     with open(csv_path, newline="") as fh:
         for r in csv.DictReader(fh):
             if r["source"] != "nas" or r["dupe_of"] or r["has_audio"] == "False":
                 dropped += r["source"] == "nas"
+                continue
+            if any(r["bucket"].startswith(b) for b in skip_buckets):
+                skipped_b += 1
                 continue
             if r["duration_s"] and float(r["duration_s"]) > MAX_PLAUSIBLE_S:
                 dropped += 1
@@ -188,7 +194,7 @@ def manifest_files(csv_path: Path) -> list[Path]:
                 DURATIONS[r["path"]] = float(r["duration_s"])
     rows.sort()
     log(f"manifest {csv_path.name}: {len(rows)} NAS videos queued, {dropped} dropped "
-        "(no audio stream / duplicate / implausible duration)")
+        f"(no audio stream / duplicate / implausible duration), {skipped_b} in skipped buckets")
     return [Path(p) for _, p in rows]
 
 
@@ -198,6 +204,8 @@ def main() -> int:
     ap.add_argument("roots", nargs="*", type=Path)
     ap.add_argument("--from-manifest", type=Path)
     ap.add_argument("--output-dir", type=Path)
+    ap.add_argument("--skip-bucket", action="append", default=[], metavar="PREFIX",
+                    help="leave out manifest rows whose bucket starts with PREFIX (repeatable)")
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--stop-after", metavar="HH:MM")
     ap.add_argument("--limit", type=int, default=0)
@@ -212,7 +220,7 @@ def main() -> int:
     files = collect(args.roots)
     if args.from_manifest:
         seen = set(files)
-        files += [f for f in manifest_files(args.from_manifest) if f not in seen]
+        files += [f for f in manifest_files(args.from_manifest, args.skip_bucket) if f not in seen]
     if not files:
         log("nothing queued (no roots, no manifest)")
         return 0

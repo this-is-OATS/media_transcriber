@@ -166,6 +166,9 @@ def collect(roots: list[Path]) -> list[Path]:
     return files
 
 
+DURATIONS: dict[str, float] = {}   # path -> seconds, from the manifest (hours remaining)
+
+
 def manifest_files(csv_path: Path) -> list[Path]:
     """NAS videos from media_manifest.csv, smallest first. Drops Photos-only
     rows, duplicates the manifest already knows, files with no audio stream
@@ -181,6 +184,8 @@ def manifest_files(csv_path: Path) -> list[Path]:
                 dropped += 1
                 continue
             rows.append((int(r["size_bytes"] or 0), r["path"]))
+            if r["duration_s"]:
+                DURATIONS[r["path"]] = float(r["duration_s"])
     rows.sort()
     log(f"manifest {csv_path.name}: {len(rows)} NAS videos queued, {dropped} dropped "
         "(no audio stream / duplicate / implausible duration)")
@@ -350,9 +355,15 @@ def main() -> int:
 
     wall = time.time() - t_run
     pending = len(queue) - done - skipped - dupes - missing
+    # Hours still to transcribe, for the morning report: manifest durations of
+    # what this run did not reach (files not in the manifest count as unknown).
+    left = queue[done + failed + skipped + dupes + missing:]
+    remaining_s = sum(DURATIONS.get(str(p), 0.0) for p in left)
+    unknown = sum(1 for p in left if str(p) not in DURATIONS)
     rtf = audio_s / wall if wall else 0.0
     log(f"SUMMARY done={done} failed={failed} skipped={skipped} dupes={dupes} "
-        f"gone={missing} pending={pending} "
+        f"gone={missing} pending={pending} remaining={fmt_h(remaining_s)}"
+        f"{'+' + str(unknown) + 'unknown' if unknown else ''} "
         f"audio={fmt_h(audio_s)} wall={fmt_h(wall)} realtime={rtf:.1f}x model={args.model}")
     return 0
 

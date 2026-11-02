@@ -53,7 +53,9 @@ deliberate choice and runs as asked.
 
 v0.7.4, measured against the real NAS (1,678 of 34,247 manifest rows): a folder
 whose name says SELFIE, TRANSCRIBE, "Live Journals", VLOG or DOGCAST (the last
-two added in 0.7.5) wins outright and keeps its place in the queue, because a screen recording filed under LONG SELFIE
+two added in 0.7.5) wins outright and keeps its place in the queue, ahead of
+even the manifest's own kind column (0.7.6 — that column is only as new as the
+last rebuild, and the wrapper runs on the previous manifest when one fails), because a screen recording filed under LONG SELFIE
 TRANSCRIBE is Johnny talking with his phone screen going. The same run showed
 SCREEN CAPS and SCREENCAPS folders were missed by "screen capture", so the
 pattern is now "screen cap"/"screencap".
@@ -216,6 +218,16 @@ def is_screen_name(name: str) -> bool:
     return any(p in flat for p in SCREEN_PATTERNS)
 
 
+def is_keep_path(path: Path) -> bool:
+    """A KEEP_PATTERNS folder anywhere below the volume.
+
+    Read from the whole path, not just below the root: the wrapper queues
+    ".../LONG SELFIE TRANSCRIBE" and ".../SELFIE" as roots themselves, and
+    relative_to() would hide exactly the folder whose name is the point.
+    """
+    return any(any(k in p.lower() for k in KEEP_PATTERNS) for p in path.parent.parts[3:])
+
+
 def is_screen_recording(path: Path, root: Path | None = None) -> bool:
     """A screen recording or screenshot, by its own name or by its folder.
 
@@ -229,11 +241,7 @@ def is_screen_recording(path: Path, root: Path | None = None) -> bool:
     SELFIE or LONG SELFIE TRANSCRIBE is him talking, and keeps its place in the
     queue however the capture tool named the file.
     """
-    # KEEP is read from the whole path below the volume, not just below the
-    # root: the wrapper queues ".../LONG SELFIE TRANSCRIBE" and ".../SELFIE" as
-    # roots themselves, and relative_to() would hide exactly the folder whose
-    # name is the point.
-    if any(any(k in p.lower() for k in KEEP_PATTERNS) for p in path.parent.parts[3:]):
+    if is_keep_path(path):
         return False
     if is_screen_name(path.name):
         return True
@@ -301,8 +309,14 @@ def manifest_files(csv_path: Path, skip_buckets: list[str] = (),
             if r["duration_s"] and float(r["duration_s"]) > MAX_PLAUSIBLE_S:
                 dropped += 1
                 continue
-            if mark_screen and (r.get("kind") == "screen"
-                                or is_screen_recording(Path(r["path"]))):
+            # KEEP is read here too, AHEAD of the kind column (v0.7.6). That
+            # column is only as new as the last manifest rebuild, and the
+            # wrapper deliberately runs on the previous manifest when a rebuild
+            # fails — so a row written before a keep word existed would stay
+            # demoted, silently, for as long as the rebuilds keep failing. This
+            # runner's own list is the newer of the two; let it win.
+            if mark_screen and not is_keep_path(Path(r["path"])) and (
+                    r.get("kind") == "screen" or is_screen_recording(Path(r["path"]))):
                 SCREEN_PATHS.add(r["path"])
                 screen += 1
             rows.append((int(r["size_bytes"] or 0), r["path"]))

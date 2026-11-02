@@ -45,9 +45,10 @@ sorted to the FRONT of the smallest-first queue, so phone-UI narration went
 through the model ahead of real footage. v0.7.2 left them out; 0.7.3 keeps them
 in the queue and puts them BEHIND every other video instead, each group still
 smallest-first, so they are transcribed eventually and nothing is written off.
-They are recognised by the manifest's own `kind` column (voice-memo-pipeline
-1.4.91+), or by the names the capture tools give them and a folder named for
-them. `--screen-recordings skip` is 0.7.2's behaviour and `inline` is pre-0.7.2.
+They are recognised by the manifest's own `screen_recording` column
+(voice-memo-pipeline 1.4.96+; it was `kind` in 1.4.91-1.4.95 and both are still
+read, since the name collided with that repo's unrelated `Music Kind`), or by
+the names the capture tools give them and a folder named for them. `--screen-recordings skip` is 0.7.2's behaviour and `inline` is pre-0.7.2.
 Only this headless runner reorders: a file dropped on the app's window is a
 deliberate choice and runs as asked.
 
@@ -293,9 +294,10 @@ def manifest_files(csv_path: Path, skip_buckets: list[str] = (),
     Live Photo clips under "PHOTOS EXPORT/PHOTOS", Johnny 2026-10-22).
 
     Screen recordings are queued like everything else and recorded in
-    SCREEN_PATHS for the queue order (v0.7.3): the manifest's own `kind` column
-    when it has one, otherwise this runner's name and folder match, so an older
-    manifest is classified here rather than trusted."""
+    SCREEN_PATHS for the queue order (v0.7.3): the manifest's own
+    screen_recording column when it has one (or `kind`, its 1.4.91-1.4.95
+    name), otherwise this runner's name and folder match, so an older manifest
+    is classified here rather than trusted."""
     rows = []
     dropped = skipped_b = screen = 0
     with open(csv_path, newline="") as fh:
@@ -316,7 +318,8 @@ def manifest_files(csv_path: Path, skip_buckets: list[str] = (),
             # demoted, silently, for as long as the rebuilds keep failing. This
             # runner's own list is the newer of the two; let it win.
             if mark_screen and not is_keep_path(Path(r["path"])) and (
-                    r.get("kind") == "screen" or is_screen_recording(Path(r["path"]))):
+                    r.get("screen_recording") == "True" or r.get("kind") == "screen"
+                    or is_screen_recording(Path(r["path"]))):
                 SCREEN_PATHS.add(r["path"])
                 screen += 1
             rows.append((int(r["size_bytes"] or 0), r["path"]))

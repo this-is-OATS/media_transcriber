@@ -31,20 +31,23 @@ What differs is deliberate and pinned:
         --skip-bucket PREFIX      leave out manifest rows in that bucket (repeatable)
         --screen-recordings interleave|last|skip|inline
                                   where screen recordings go in the queue;
-                                  default last — see below
+                                  default interleave — see below
         --output-dir DIR          write markdown here as <stem>__<sha12>.md
                                   instead of a transcriptions/ folder beside
                                   each video (the whole-NAS run would litter
                                   hundreds of folders otherwise)
 
-Screen recordings and screenshots go LAST (v0.7.3, Johnny 2026-11-02; the
-problem is from the 2026-10-19 memo, "fix media transcriber problem with
-scanning screenshots and sorting"). A screen recording is a movie with an audio
-track, so it was queued like any other video — and because they are small they
-sorted to the FRONT of the smallest-first queue, so phone-UI narration went
-through the model ahead of real footage. v0.7.2 left them out; 0.7.3 keeps them
-in the queue and puts them BEHIND every other video instead, each group still
-smallest-first, so they are transcribed eventually and nothing is written off.
+Screen recordings and screenshots are INTERLEAVED one slot in four (v0.7.8,
+Johnny 2026-11-02; the problem is from the 2026-10-19 memo, "fix media
+transcriber problem with scanning screenshots and sorting"). A screen recording
+is a movie with an audio track, so it was queued like any other video — and
+because they are small they sorted to the FRONT of the smallest-first queue, so
+phone-UI narration went through the model ahead of real footage. v0.7.2 left
+them out; 0.7.3 put them BEHIND every other video; 0.7.8 gives them one slot in
+SCREEN_EVERY instead, each group still smallest-first, so both piles drain.
+Johnny threw out "last" the same day it shipped — "there is no such thing as
+last" — and he is right: a few files a night means position IS whether a file
+is ever reached. `tests/test_order.py` reads the order back off real files.
 They are recognised by the manifest's own `screen_recording` column
 (voice-memo-pipeline 1.4.96+; it was `kind` in 1.4.91-1.4.95 and both are still
 read, since the name collided with that repo's unrelated `Music Kind`), or by
@@ -422,7 +425,8 @@ def main() -> int:
                     help="leave out manifest rows whose bucket starts with PREFIX (repeatable)")
     ap.add_argument("--screen-recordings", choices=("interleave", "last", "skip", "inline"), default="interleave",
                     help="where screen recordings and screenshots go in the queue: "
-                         "last (default — behind every other video), skip (left out), "
+                         f"interleave (default — one slot in {SCREEN_EVERY}), "
+                         "last (behind every other video), skip (left out), "
                          "inline (no special handling)")
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--stop-after", metavar="HH:MM")

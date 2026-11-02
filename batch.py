@@ -29,10 +29,25 @@ What differs is deliberate and pinned:
                                   bare /Volumes/NAS root would sweep in music
                                   and the voice-memo archive)
         --skip-bucket PREFIX      leave out manifest rows in that bucket (repeatable)
+        --include-screen-recordings
+                                  queue screen recordings and screenshots too
+                                  (by default they are left out — see below)
         --output-dir DIR          write markdown here as <stem>__<sha12>.md
                                   instead of a transcriptions/ folder beside
                                   each video (the whole-NAS run would litter
                                   hundreds of folders otherwise)
+
+Screen recordings and screenshots (v0.7.2, Johnny 2026-10-19: "fix media
+transcriber problem with scanning screenshots and sorting"). A screen recording
+is a movie with an audio track, so it was queued like any other video — and
+because they are small they sorted to the FRONT of the smallest-first queue, so
+phone-UI narration went through the model ahead of real footage. Both the root
+walk and the manifest now leave them out: the manifest's own `kind` column when
+it has one (voice-memo-pipeline 1.4.91+), otherwise the names the capture tools
+give them and a folder named for them. Nothing is deleted, nothing is marked
+skipped in the sqlite, and --include-screen-recordings queues them again. Only
+this headless runner filters: a file dropped on the app's window is a deliberate
+choice and still transcribes.
 
 Guards for the whole-NAS run: a file whose container claims more than 12 hours
 is skipped as broken (one 0 MB file reports 596 h — its audio would not fit the
@@ -77,6 +92,22 @@ DEFAULT_MODEL = "large-v3-turbo"
 MAX_PLAUSIBLE_S = 12 * 3600          # longer than this = broken container
 WAV_BYTES_PER_S = 32000              # 16 kHz mono s16
 MIN_FREE_BYTES = 2 * 1024 ** 3
+
+# What a capture tool calls a screen recording or a screenshot, in the file's
+# own name or in a folder named for them. Matched against the name lowercased
+# with "_" and "-" read as spaces, so "Screen_Recording", "screen-recording"
+# and "Screen Recording" are one pattern. Kept in step with
+# build_media_manifest.py in voice-memo-pipeline, which writes the manifest's
+# `kind` column with the same list — change both together.
+SCREEN_PATTERNS = (
+    "screen recording",      # iOS/macOS, and the SCREEN RECORDINGS folders
+    "screenrecording",
+    "screen shot", "screenshot",
+    "screen capture", "screencapture",
+    "screencast",
+    "rpreplay",              # iOS ReplayKit: RPReplay_Final1698275632.mov
+    "simulator screen",      # Xcode Simulator captures
+)
 
 _stop = False
 
@@ -151,33 +182,78 @@ def fmt_h(seconds: float) -> str:
     return f"{seconds / 3600:.1f}h"
 
 
-def collect(roots: list[Path]) -> list[Path]:
+def is_screen_name(name: str) -> bool:
+    flat = name.lower().replace("_", " ").replace("-", " ")
+    return any(p in flat for p in SCREEN_PATTERNS)
+
+
+def is_screen_recording(path: Path, root: Path | None = None) -> bool:
+    """A screen recording or screenshot, by its own name or by its folder.
+
+    A folder named for them counts: a SCREEN RECORDINGS folder full of files
+    named IMG_0042.mov is still a folder of screen recordings. Only the folders
+    BELOW the root are read when a root is given, so a drop folder that is
+    itself called "SCREENSHOTS" does not tag everything the caller asked for —
+    naming a root is a deliberate choice, the same rule as the app's window.
+    """
+    if is_screen_name(path.name):
+        return True
+    parts = path.parent.parts
+    if root is not None:
+        try:
+            parts = path.parent.relative_to(root).parts
+        except ValueError:
+            pass
+    else:
+        parts = parts[3:]            # skip "/", "Volumes", "<volume>"
+    return any(is_screen_name(p) for p in parts)
+
+
+def collect(roots: list[Path], include_screen: bool = False) -> list[Path]:
     """Roots in the order given (smallest bucket first is the caller's job);
-    inside a root, smallest file first — the same rule one level down."""
+    inside a root, smallest file first — the same rule one level down. Screen
+    recordings are left out unless include_screen (v0.7.2)."""
     files: list[Path] = []
     seen: set[Path] = set()
+    screen = 0
     for root in roots:
         if not root.exists():
             log(f"WARNING: root missing, skipped: {root}")
             continue
-        batch = [f for f in find_media_files(root) if f not in seen]
+        batch = []
+        for f in find_media_files(root):
+            if f in seen:
+                continue
+            if not include_screen and is_screen_recording(f, root):
+                screen += 1
+                continue
+            batch.append(f)
         batch.sort(key=lambda f: f.stat().st_size)
         files.extend(batch)
         seen.update(batch)
+    if screen:
+        log(f"roots: {screen} screen recording(s) / screenshot(s) left out "
+            f"(--include-screen-recordings queues them)")
     return files
 
 
 DURATIONS: dict[str, float] = {}   # path -> seconds, from the manifest (hours remaining)
 
 
-def manifest_files(csv_path: Path, skip_buckets: list[str] = ()) -> list[Path]:
+def manifest_files(csv_path: Path, skip_buckets: list[str] = (),
+                   include_screen: bool = False) -> list[Path]:
     """NAS videos from media_manifest.csv, smallest first. Drops Photos-only
     rows, duplicates the manifest already knows, files with no audio stream,
     containers claiming an implausible duration, and any bucket named in
     skip_buckets (prefix match on the manifest's bucket column — e.g. the
-    Live Photo clips under "PHOTOS EXPORT/PHOTOS", Johnny 2026-10-22)."""
+    Live Photo clips under "PHOTOS EXPORT/PHOTOS", Johnny 2026-10-22).
+
+    Screen recordings go too (v0.7.2): the manifest's own `kind` column when it
+    has one, otherwise this runner's own name and folder match, so an older
+    manifest — or the full census CSV instead of media_manifest_queue.csv — is
+    filtered here rather than trusted."""
     rows = []
-    dropped = skipped_b = 0
+    dropped = skipped_b = screen = 0
     with open(csv_path, newline="") as fh:
         for r in csv.DictReader(fh):
             if r["source"] != "nas" or r["dupe_of"] or r["has_audio"] == "False":
@@ -185,6 +261,10 @@ def manifest_files(csv_path: Path, skip_buckets: list[str] = ()) -> list[Path]:
                 continue
             if any(r["bucket"].startswith(b) for b in skip_buckets):
                 skipped_b += 1
+                continue
+            if not include_screen and (r.get("kind") == "screen"
+                                       or is_screen_recording(Path(r["path"]))):
+                screen += 1
                 continue
             if r["duration_s"] and float(r["duration_s"]) > MAX_PLAUSIBLE_S:
                 dropped += 1
@@ -194,7 +274,8 @@ def manifest_files(csv_path: Path, skip_buckets: list[str] = ()) -> list[Path]:
                 DURATIONS[r["path"]] = float(r["duration_s"])
     rows.sort()
     log(f"manifest {csv_path.name}: {len(rows)} NAS videos queued, {dropped} dropped "
-        f"(no audio stream / duplicate / implausible duration), {skipped_b} in skipped buckets")
+        f"(no audio stream / duplicate / implausible duration), {skipped_b} in skipped buckets, "
+        f"{screen} screen recording(s)")
     return [Path(p) for _, p in rows]
 
 
@@ -206,6 +287,8 @@ def main() -> int:
     ap.add_argument("--output-dir", type=Path)
     ap.add_argument("--skip-bucket", action="append", default=[], metavar="PREFIX",
                     help="leave out manifest rows whose bucket starts with PREFIX (repeatable)")
+    ap.add_argument("--include-screen-recordings", action="store_true",
+                    help="queue screen recordings and screenshots too (default: left out)")
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--stop-after", metavar="HH:MM")
     ap.add_argument("--limit", type=int, default=0)
@@ -217,10 +300,11 @@ def main() -> int:
 
     signal.signal(signal.SIGTERM, _on_term)
     db = Database(DB_PATH)
-    files = collect(args.roots)
+    files = collect(args.roots, args.include_screen_recordings)
     if args.from_manifest:
         seen = set(files)
-        files += [f for f in manifest_files(args.from_manifest, args.skip_bucket) if f not in seen]
+        files += [f for f in manifest_files(args.from_manifest, args.skip_bucket,
+                                           args.include_screen_recordings) if f not in seen]
     if not files:
         log("nothing queued (no roots, no manifest)")
         return 0

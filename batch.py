@@ -29,25 +29,27 @@ What differs is deliberate and pinned:
                                   bare /Volumes/NAS root would sweep in music
                                   and the voice-memo archive)
         --skip-bucket PREFIX      leave out manifest rows in that bucket (repeatable)
-        --include-screen-recordings
-                                  queue screen recordings and screenshots too
-                                  (by default they are left out — see below)
+        --screen-recordings last|skip|inline
+                                  where screen recordings go in the queue;
+                                  default last — see below
         --output-dir DIR          write markdown here as <stem>__<sha12>.md
                                   instead of a transcriptions/ folder beside
                                   each video (the whole-NAS run would litter
                                   hundreds of folders otherwise)
 
-Screen recordings and screenshots (v0.7.2, Johnny 2026-10-19: "fix media
-transcriber problem with scanning screenshots and sorting"). A screen recording
-is a movie with an audio track, so it was queued like any other video — and
-because they are small they sorted to the FRONT of the smallest-first queue, so
-phone-UI narration went through the model ahead of real footage. Both the root
-walk and the manifest now leave them out: the manifest's own `kind` column when
-it has one (voice-memo-pipeline 1.4.91+), otherwise the names the capture tools
-give them and a folder named for them. Nothing is deleted, nothing is marked
-skipped in the sqlite, and --include-screen-recordings queues them again. Only
-this headless runner filters: a file dropped on the app's window is a deliberate
-choice and still transcribes.
+Screen recordings and screenshots go LAST (v0.7.3, Johnny 2026-11-02; the
+problem is from the 2026-10-19 memo, "fix media transcriber problem with
+scanning screenshots and sorting"). A screen recording is a movie with an audio
+track, so it was queued like any other video — and because they are small they
+sorted to the FRONT of the smallest-first queue, so phone-UI narration went
+through the model ahead of real footage. v0.7.2 left them out; 0.7.3 keeps them
+in the queue and puts them BEHIND every other video instead, each group still
+smallest-first, so they are transcribed eventually and nothing is written off.
+They are recognised by the manifest's own `kind` column (voice-memo-pipeline
+1.4.91+), or by the names the capture tools give them and a folder named for
+them. `--screen-recordings skip` is 0.7.2's behaviour and `inline` is pre-0.7.2.
+Only this headless runner reorders: a file dropped on the app's window is a
+deliberate choice and runs as asked.
 
 Guards for the whole-NAS run: a file whose container claims more than 12 hours
 is skipped as broken (one 0 MB file reports 596 h — its audio would not fit the
@@ -209,49 +211,48 @@ def is_screen_recording(path: Path, root: Path | None = None) -> bool:
     return any(is_screen_name(p) for p in parts)
 
 
-def collect(roots: list[Path], include_screen: bool = False) -> list[Path]:
+def collect(roots: list[Path], mark_screen: bool = True) -> list[Path]:
     """Roots in the order given (smallest bucket first is the caller's job);
-    inside a root, smallest file first — the same rule one level down. Screen
-    recordings are left out unless include_screen (v0.7.2)."""
+    inside a root, smallest file first — the same rule one level down.
+
+    Nothing is left out here. A screen recording is recorded in SCREEN_PATHS
+    and the queue order decides what happens to it (v0.7.3); mark_screen=False
+    is --screen-recordings inline, where they are ordinary videos."""
     files: list[Path] = []
     seen: set[Path] = set()
-    screen = 0
     for root in roots:
         if not root.exists():
             log(f"WARNING: root missing, skipped: {root}")
             continue
-        batch = []
-        for f in find_media_files(root):
-            if f in seen:
-                continue
-            if not include_screen and is_screen_recording(f, root):
-                screen += 1
-                continue
-            batch.append(f)
+        batch = [f for f in find_media_files(root) if f not in seen]
         batch.sort(key=lambda f: f.stat().st_size)
+        if mark_screen:
+            SCREEN_PATHS.update(str(f) for f in batch if is_screen_recording(f, root))
         files.extend(batch)
         seen.update(batch)
-    if screen:
-        log(f"roots: {screen} screen recording(s) / screenshot(s) left out "
-            f"(--include-screen-recordings queues them)")
     return files
 
 
 DURATIONS: dict[str, float] = {}   # path -> seconds, from the manifest (hours remaining)
+# Paths this run treats as screen recordings: filled by collect() (name or a
+# folder below the root) and by manifest_files() (the manifest's own `kind`
+# column, with the same name/folder match as the fallback). The queue order
+# reads it — see order_queue().
+SCREEN_PATHS: set[str] = set()
 
 
 def manifest_files(csv_path: Path, skip_buckets: list[str] = (),
-                   include_screen: bool = False) -> list[Path]:
+                   mark_screen: bool = True) -> list[Path]:
     """NAS videos from media_manifest.csv, smallest first. Drops Photos-only
     rows, duplicates the manifest already knows, files with no audio stream,
     containers claiming an implausible duration, and any bucket named in
     skip_buckets (prefix match on the manifest's bucket column — e.g. the
     Live Photo clips under "PHOTOS EXPORT/PHOTOS", Johnny 2026-10-22).
 
-    Screen recordings go too (v0.7.2): the manifest's own `kind` column when it
-    has one, otherwise this runner's own name and folder match, so an older
-    manifest — or the full census CSV instead of media_manifest_queue.csv — is
-    filtered here rather than trusted."""
+    Screen recordings are queued like everything else and recorded in
+    SCREEN_PATHS for the queue order (v0.7.3): the manifest's own `kind` column
+    when it has one, otherwise this runner's name and folder match, so an older
+    manifest is classified here rather than trusted."""
     rows = []
     dropped = skipped_b = screen = 0
     with open(csv_path, newline="") as fh:
@@ -262,13 +263,13 @@ def manifest_files(csv_path: Path, skip_buckets: list[str] = (),
             if any(r["bucket"].startswith(b) for b in skip_buckets):
                 skipped_b += 1
                 continue
-            if not include_screen and (r.get("kind") == "screen"
-                                       or is_screen_recording(Path(r["path"]))):
-                screen += 1
-                continue
             if r["duration_s"] and float(r["duration_s"]) > MAX_PLAUSIBLE_S:
                 dropped += 1
                 continue
+            if mark_screen and (r.get("kind") == "screen"
+                                or is_screen_recording(Path(r["path"]))):
+                SCREEN_PATHS.add(r["path"])
+                screen += 1
             rows.append((int(r["size_bytes"] or 0), r["path"]))
             if r["duration_s"]:
                 DURATIONS[r["path"]] = float(r["duration_s"])
@@ -279,6 +280,30 @@ def manifest_files(csv_path: Path, skip_buckets: list[str] = (),
     return [Path(p) for _, p in rows]
 
 
+def order_queue(queue: list[Path], policy: str) -> list[Path]:
+    """The queue with the screen recordings where the policy puts them.
+
+    "last" (the default, Johnny 2026-11-02): they stay in the queue but go
+    behind every other video, each group still smallest-first. Real footage is
+    never waiting behind phone-UI narration again, and nothing is written off —
+    when the backlog of footage is done, these run.
+    "skip" is v0.7.2's behaviour, "inline" is pre-0.7.2 (no special handling).
+    """
+    if policy == "inline" or not SCREEN_PATHS:
+        return queue
+    head = [f for f in queue if str(f) not in SCREEN_PATHS]
+    tail = [f for f in queue if str(f) in SCREEN_PATHS]
+    if not tail:
+        return queue
+    if policy == "skip":
+        log(f"{len(tail)} screen recording(s) / screenshot(s) left out of the queue "
+            f"(--screen-recordings skip)")
+        return head
+    log(f"{len(tail)} screen recording(s) / screenshot(s) moved behind the "
+        f"{len(head)} other video(s) (--screen-recordings last)")
+    return head + tail
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -287,8 +312,10 @@ def main() -> int:
     ap.add_argument("--output-dir", type=Path)
     ap.add_argument("--skip-bucket", action="append", default=[], metavar="PREFIX",
                     help="leave out manifest rows whose bucket starts with PREFIX (repeatable)")
-    ap.add_argument("--include-screen-recordings", action="store_true",
-                    help="queue screen recordings and screenshots too (default: left out)")
+    ap.add_argument("--screen-recordings", choices=("last", "skip", "inline"), default="last",
+                    help="where screen recordings and screenshots go in the queue: "
+                         "last (default — behind every other video), skip (left out), "
+                         "inline (no special handling)")
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--stop-after", metavar="HH:MM")
     ap.add_argument("--limit", type=int, default=0)
@@ -300,11 +327,12 @@ def main() -> int:
 
     signal.signal(signal.SIGTERM, _on_term)
     db = Database(DB_PATH)
-    files = collect(args.roots, args.include_screen_recordings)
+    mark_screen = args.screen_recordings != "inline"
+    files = collect(args.roots, mark_screen)
     if args.from_manifest:
         seen = set(files)
         files += [f for f in manifest_files(args.from_manifest, args.skip_bucket,
-                                           args.include_screen_recordings) if f not in seen]
+                                           mark_screen) if f not in seen]
     if not files:
         log("nothing queued (no roots, no manifest)")
         return 0
@@ -318,6 +346,9 @@ def main() -> int:
             already += 1
         else:
             queue.append(f)
+    # The screen recordings go to the back here, after the already-done ones
+    # are out, so "pending" counts what will actually run tonight.
+    queue = order_queue(queue, args.screen_recordings)
     log(f"model={args.model}  found={len(files)}  done_with_model={already}  "
         f"known_no_audio={noaudio_known}  pending={len(queue)}")
     if args.pending:

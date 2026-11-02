@@ -52,8 +52,8 @@ Only this headless runner reorders: a file dropped on the app's window is a
 deliberate choice and runs as asked.
 
 v0.7.4, measured against the real NAS (1,678 of 34,247 manifest rows): a folder
-whose name says SELFIE, TRANSCRIBE or "Live Journals" wins outright and keeps
-its place in the queue, because a screen recording filed under LONG SELFIE
+whose name says SELFIE, TRANSCRIBE, "Live Journals", VLOG or DOGCAST (the last
+two added in 0.7.5) wins outright and keeps its place in the queue, because a screen recording filed under LONG SELFIE
 TRANSCRIBE is Johnny talking with his phone screen going. The same run showed
 SCREEN CAPS and SCREENCAPS folders were missed by "screen capture", so the
 pattern is now "screen cap"/"screencap".
@@ -133,6 +133,9 @@ KEEP_PATTERNS = (
     "selfie",                # SELFIE, KENOSHA SELFIES, SELFIE CAM, …
     "transcribe",            # LONG SELFIE TRANSCRIBE, JUST TRANSCRIBE
     "live journal",          # SORTING AREA/Live Journals
+    "vlog",                  # v0.7.5, Johnny 2026-11-02
+    "dogcast",               # the podcast — DOGCAST WITH WATERS ABOVE, whose
+                             # source clips are RPReplay screen recordings
 )
 
 _stop = False

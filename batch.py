@@ -29,7 +29,7 @@ What differs is deliberate and pinned:
                                   bare /Volumes/NAS root would sweep in music
                                   and the voice-memo archive)
         --skip-bucket PREFIX      leave out manifest rows in that bucket (repeatable)
-        --screen-recordings last|skip|inline
+        --screen-recordings interleave|last|skip|inline
                                   where screen recordings go in the queue;
                                   default last — see below
         --output-dir DIR          write markdown here as <stem>__<sha12>.md
@@ -332,14 +332,64 @@ def manifest_files(csv_path: Path, skip_buckets: list[str] = (),
     return [Path(p) for _, p in rows]
 
 
+# One slot in SCREEN_EVERY goes to a screen recording.
+SCREEN_EVERY = 4
+
+
+def interleave(main: list, screen: list, every: int = SCREEN_EVERY) -> list:
+    """`main` in order, one from `screen` every `every` slots.
+
+    Whichever list runs out first, the rest of the other is appended — nothing
+    is dropped, which is the entire point of this function.
+    """
+    if not screen:
+        return list(main)
+    out: list = []
+    m, s = iter(main), iter(screen)
+    while True:
+        ran_dry = False
+        for _ in range(every - 1):
+            nxt = next(m, None)
+            if nxt is None:
+                ran_dry = True
+                break
+            out.append(nxt)
+        nxt = next(s, None)
+        if nxt is not None:
+            out.append(nxt)
+        elif ran_dry:
+            break
+        if ran_dry and nxt is None:
+            break
+        if ran_dry:
+            out.extend(s)
+            break
+    out.extend(m)
+    out.extend(s)
+    return out
+
+
 def order_queue(queue: list[Path], policy: str) -> list[Path]:
     """The queue with the screen recordings where the policy puts them.
 
-    "last" (the default, Johnny 2026-11-02): they stay in the queue but go
-    behind every other video, each group still smallest-first. Real footage is
-    never waiting behind phone-UI narration again, and nothing is written off —
-    when the backlog of footage is done, these run.
-    "skip" is v0.7.2's behaviour, "inline" is pre-0.7.2 (no special handling).
+    "interleave" (the default since v0.7.8, Johnny 2026-11-02): one slot in
+    SCREEN_EVERY goes to a screen recording, each group still smallest-first,
+    so both piles drain.
+
+    He threw out "last", which was this file's default for a few hours:
+    "there is no such thing as last". He is right. 34,247 rows going a few a
+    night means position IS whether a file is ever reached, so parking them
+    behind the entire backlog of footage is skipping them with better manners.
+    And they are not skippable — a screen recording is him narrating over a
+    phone UI, so there is speech in it. His rule: skip the file you know you
+    CANNOT transcribe, never one you can.
+
+    Interleaving still answers the 10-19 complaint. Screen recordings are
+    small, so plain smallest-first put them at the FRONT and they ate the
+    night; now footage keeps three slots in four.
+
+    "last" and "skip" remain, so the old behaviour can be asked for by name.
+    "inline" is pre-0.7.2: no special handling at all.
     """
     if policy == "inline" or not SCREEN_PATHS:
         return queue
@@ -351,9 +401,15 @@ def order_queue(queue: list[Path], policy: str) -> list[Path]:
         log(f"{len(tail)} screen recording(s) / screenshot(s) left out of the queue "
             f"(--screen-recordings skip)")
         return head
-    log(f"{len(tail)} screen recording(s) / screenshot(s) moved behind the "
-        f"{len(head)} other video(s) (--screen-recordings last)")
-    return head + tail
+    if policy == "last":
+        log(f"{len(tail)} screen recording(s) / screenshot(s) moved behind the "
+            f"{len(head)} other video(s) (--screen-recordings last)")
+        return head + tail
+    out = interleave(head, tail)
+    log(f"{len(tail)} screen recording(s) / screenshot(s) interleaved 1 in "
+        f"{SCREEN_EVERY} among {len(head)} other video(s) — {len(out)} queued, "
+        f"none dropped")
+    return out
 
 
 def main() -> int:
@@ -364,7 +420,7 @@ def main() -> int:
     ap.add_argument("--output-dir", type=Path)
     ap.add_argument("--skip-bucket", action="append", default=[], metavar="PREFIX",
                     help="leave out manifest rows whose bucket starts with PREFIX (repeatable)")
-    ap.add_argument("--screen-recordings", choices=("last", "skip", "inline"), default="last",
+    ap.add_argument("--screen-recordings", choices=("interleave", "last", "skip", "inline"), default="interleave",
                     help="where screen recordings and screenshots go in the queue: "
                          "last (default — behind every other video), skip (left out), "
                          "inline (no special handling)")

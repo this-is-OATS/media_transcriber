@@ -1,6 +1,6 @@
 """MEDIA_TRANSCRIBER — local media transcription with optional speaker diarization."""
 
-__version__ = "0.7.3"
+__version__ = "0.7.4"
 
 
 def version_label() -> str:

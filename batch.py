@@ -51,6 +51,13 @@ them. `--screen-recordings skip` is 0.7.2's behaviour and `inline` is pre-0.7.2.
 Only this headless runner reorders: a file dropped on the app's window is a
 deliberate choice and runs as asked.
 
+v0.7.4, measured against the real NAS (1,678 of 34,247 manifest rows): a folder
+whose name says SELFIE, TRANSCRIBE or "Live Journals" wins outright and keeps
+its place in the queue, because a screen recording filed under LONG SELFIE
+TRANSCRIBE is Johnny talking with his phone screen going. The same run showed
+SCREEN CAPS and SCREENCAPS folders were missed by "screen capture", so the
+pattern is now "screen cap"/"screencap".
+
 Guards for the whole-NAS run: a file whose container claims more than 12 hours
 is skipped as broken (one 0 MB file reports 596 h — its audio would not fit the
 boot drive); a file whose extracted audio would not leave 2 GB free is left for
@@ -105,10 +112,27 @@ SCREEN_PATTERNS = (
     "screen recording",      # iOS/macOS, and the SCREEN RECORDINGS folders
     "screenrecording",
     "screen shot", "screenshot",
-    "screen capture", "screencapture",
+    "screen cap", "screencap",   # v0.7.4: also the SCREEN CAPS and SCREENCAPS
+                                 # folders, which "screen capture" missed — the
+                                 # 2026-11-02 --list-screen run over the real
+                                 # NAS found files in them caught only by their
+                                 # own names
     "screencast",
     "rpreplay",              # iOS ReplayKit: RPReplay_Final1698275632.mov
     "simulator screen",      # Xcode Simulator captures
+)
+
+# Folders whose name says this is content Johnny wants transcribed, whatever the
+# file is called (v0.7.4, his call on 2026-11-02 after reading the real list:
+# "the folder wins"). A screen recording under LONG SELFIE TRANSCRIBE is him
+# talking with his phone screen going — he filed it there on purpose, so it
+# keeps its place in the queue instead of going behind everything else. Matched
+# on folder names only, never the file's own name. Kept in step with
+# build_media_manifest.py in voice-memo-pipeline — change both together.
+KEEP_PATTERNS = (
+    "selfie",                # SELFIE, KENOSHA SELFIES, SELFIE CAM, …
+    "transcribe",            # LONG SELFIE TRANSCRIBE, JUST TRANSCRIBE
+    "live journal",          # SORTING AREA/Live Journals
 )
 
 _stop = False
@@ -197,17 +221,25 @@ def is_screen_recording(path: Path, root: Path | None = None) -> bool:
     BELOW the root are read when a root is given, so a drop folder that is
     itself called "SCREENSHOTS" does not tag everything the caller asked for —
     naming a root is a deliberate choice, the same rule as the app's window.
+
+    A KEEP_PATTERNS folder wins outright (v0.7.4): what Johnny filed under
+    SELFIE or LONG SELFIE TRANSCRIBE is him talking, and keeps its place in the
+    queue however the capture tool named the file.
     """
+    # KEEP is read from the whole path below the volume, not just below the
+    # root: the wrapper queues ".../LONG SELFIE TRANSCRIBE" and ".../SELFIE" as
+    # roots themselves, and relative_to() would hide exactly the folder whose
+    # name is the point.
+    if any(any(k in p.lower() for k in KEEP_PATTERNS) for p in path.parent.parts[3:]):
+        return False
     if is_screen_name(path.name):
         return True
-    parts = path.parent.parts
+    parts = path.parent.parts[3:]    # skip "/", "Volumes", "<volume>"
     if root is not None:
         try:
             parts = path.parent.relative_to(root).parts
         except ValueError:
             pass
-    else:
-        parts = parts[3:]            # skip "/", "Volumes", "<volume>"
     return any(is_screen_name(p) for p in parts)
 
 

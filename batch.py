@@ -100,6 +100,43 @@ from app.db import Database                          # noqa: E402
 from app.notion_sync import NotionSync, find_token   # noqa: E402
 from app.transcriber import Transcriber, find_media_files  # noqa: E402
 
+
+def photos_sidecar(src: Path) -> dict | None:
+    """Photos' own metadata for a video exported onto the NAS (0.7.10).
+
+    voice-memo-pipeline's export_new_photos_videos.py writes <UUID>.photos.json
+    beside each movie it copies: uuid, original_filename, taken_at, title,
+    albums, location. With it, the Media Logs row is an Apple Photos row —
+    Source "Apple Photos", Media ID the Photos UUID, a dated human title —
+    instead of a "File" row titled by its UUID. Without it, nothing changes.
+    """
+    import json
+    side = src.with_name(src.stem + ".photos.json")
+    if not side.exists():
+        return None
+    try:
+        d = json.loads(side.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict) or not d.get("uuid"):
+        return None
+    return d
+
+
+def photos_page_args(src: Path, sc: dict) -> dict:
+    """media_id / title / meta for notion.push from a sidecar."""
+    original = sc.get("original_filename") or src.name
+    taken = sc.get("taken_at") or ""
+    title = f"{taken[:10]} {Path(original).stem}".strip() or src.stem
+    return {
+        "media_id": str(sc["uuid"]).upper(),
+        "title": title,
+        "meta": {"source": "photos", "photos_uuid": str(sc["uuid"]).upper(),
+                 "taken_at": taken or None, "location": sc.get("location") or None,
+                 "albums": ", ".join(sc.get("albums") or []) or None,
+                 "original_filename": original},
+    }
+
 APP_DATA = Path.home() / "Library" / "Application Support" / "MediaTranscriber"
 DB_PATH = APP_DATA / "transcripts.sqlite"
 AUDIO_CACHE = Path.home() / "Library" / "Caches" / "MediaTranscriber" / "audio"
@@ -576,10 +613,13 @@ def main() -> int:
         db.set_sha256(video_id, digest)
         if notion is not None:
             try:
+                sc = photos_sidecar(src)
+                page = (photos_page_args(src, sc) if sc
+                        else {"media_id": str(src), "title": src.stem, "meta": None})
                 page_id = notion.push(
-                    media_id=str(src), title=src.stem, segments=result.segments,
+                    segments=result.segments,
                     duration=dur, language=result.language, model=result.model_name,
-                    file_path=str(src), content_hash=digest,
+                    file_path=str(src), content_hash=digest, **page,
                 )
                 db.set_notion_page(video_id, page_id)
                 log("  Notion: logged to Media Logs")

@@ -178,6 +178,11 @@ class NotionSync:
 
         notes_title = "Notes — Whisper"
         page_id = self._find_page(media_id)
+        if page_id is None and file_path and file_path != media_id:
+            # 0.7.10: rows for NAS copies of Photos videos were first logged with
+            # the file path as their Media ID. Found that way, the same page is
+            # updated to its Photos identity rather than duplicated.
+            page_id = self._find_page(file_path)
         if page_id and not add_to_existing:
             return page_id
         if page_id:

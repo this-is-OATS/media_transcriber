@@ -16,6 +16,7 @@ if "/opt/homebrew/bin" not in os.environ.get("PATH", ""):
 MEDIA_EXTENSIONS = {
     ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".opus", ".aac",
     ".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm",
+    ".dv",   # old DV camcorder / iMovie clips (~400 on the NAS, 2026-11-25)
 }
 
 
